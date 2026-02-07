@@ -30,9 +30,9 @@ const Tracking = () => {
   const [isFlightListOpen, setIsFlightListOpen] = useState(false);
   const [filterAirline, setFilterAirline] = useState<string | null>(null);
 
-  // Initialize flights
+  // Initialize flights with more worldwide coverage
   useEffect(() => {
-    const initialFlights = generateLiveFlights(60);
+    const initialFlights = generateLiveFlights(200);
     setFlights(initialFlights);
   }, []);
 
