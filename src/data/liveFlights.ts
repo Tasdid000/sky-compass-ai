@@ -4,7 +4,7 @@ import { worldAirports, Airport } from "./airports";
 // Re-export airports for backward compatibility
 export const majorAirports = worldAirports;
 
-const airlines = [
+export const airlines = [
   { code: "AA", name: "American Airlines", color: "#0078D2" },
   { code: "UA", name: "United Airlines", color: "#002244" },
   { code: "DL", name: "Delta Air Lines", color: "#003366" },
