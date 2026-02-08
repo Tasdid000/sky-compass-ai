@@ -134,14 +134,42 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
       el.className = `airport-marker ${airport.size}`;
       
       const isLarge = airport.size === "large";
-      const showLabel = zoom >= 4 || (isLarge && zoom >= 3);
-      const dotSize = isLarge ? 12 : zoom >= 5 ? 8 : 6;
+      const isMedium = airport.size === "medium";
+      const showLabel = zoom >= 4 || (isLarge && zoom >= 2) || (isMedium && zoom >= 3);
+      
+      // Size based on airport importance and zoom
+      let dotSize = 6;
+      if (isLarge) {
+        dotSize = zoom >= 4 ? 14 : zoom >= 3 ? 12 : 10;
+      } else if (isMedium) {
+        dotSize = zoom >= 5 ? 10 : 8;
+      } else {
+        dotSize = zoom >= 6 ? 8 : 6;
+      }
+      
       const borderColor = mapStyle === "light" ? "#1f2937" : "#ffffff";
-      const fillColor = isLarge ? "#3b82f6" : mapStyle === "light" ? "#6b7280" : "#9ca3af";
+      const fillColor = isLarge ? "#3b82f6" : isMedium ? "#8b5cf6" : mapStyle === "light" ? "#6b7280" : "#9ca3af";
       
       el.innerHTML = `
-        <div style="position: relative;">
-          ${showLabel ? `<div class="airport-label">${airport.code}</div>` : ""}
+        <div style="position: relative; display: flex; flex-direction: column; align-items: center;">
+          ${showLabel ? `
+            <div class="airport-label" style="
+              position: absolute;
+              top: -${dotSize + 18}px;
+              left: 50%;
+              transform: translateX(-50%);
+              background: rgba(0,0,0,0.85);
+              color: white;
+              padding: 3px 8px;
+              border-radius: 4px;
+              font-size: 11px;
+              font-weight: 700;
+              white-space: nowrap;
+              pointer-events: none;
+              box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+              opacity: 1;
+            ">${airport.code}</div>
+          ` : ""}
           <div style="
             width: ${dotSize}px;
             height: ${dotSize}px;
@@ -149,26 +177,51 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
             border: 2px solid ${borderColor};
             border-radius: 50%;
             transition: transform 0.2s, box-shadow 0.2s;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.4);
           "></div>
         </div>
       `;
       
-      el.title = `${airport.code} - ${airport.name}, ${airport.city}`;
+      el.title = `${airport.code} - ${airport.name}, ${airport.city}, ${airport.country}`;
       
       el.addEventListener("mouseenter", () => {
         const dot = el.querySelector("div > div:last-child") as HTMLElement;
         if (dot) {
           dot.style.transform = "scale(1.5)";
-          dot.style.boxShadow = "0 4px 12px rgba(59, 130, 246, 0.5)";
+          dot.style.boxShadow = `0 4px 12px ${fillColor}80`;
+        }
+        // Show label on hover even if not visible by default
+        const label = el.querySelector(".airport-label") as HTMLElement;
+        if (!label) {
+          const newLabel = document.createElement("div");
+          newLabel.className = "airport-label-hover";
+          newLabel.style.cssText = `
+            position: absolute;
+            top: -${dotSize + 18}px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.9);
+            color: white;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 700;
+            white-space: nowrap;
+            pointer-events: none;
+            z-index: 1000;
+          `;
+          newLabel.textContent = airport.code;
+          el.querySelector("div")?.appendChild(newLabel);
         }
       });
       el.addEventListener("mouseleave", () => {
         const dot = el.querySelector("div > div:last-child") as HTMLElement;
         if (dot) {
           dot.style.transform = "scale(1)";
-          dot.style.boxShadow = "0 2px 4px rgba(0,0,0,0.3)";
+          dot.style.boxShadow = "0 2px 6px rgba(0,0,0,0.4)";
         }
+        const hoverLabel = el.querySelector(".airport-label-hover");
+        hoverLabel?.remove();
       });
       
       return el;
@@ -183,14 +236,20 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
         
         const zoom = map.current.getZoom();
         
-        // Show airports at different zoom levels
+        // Major hub codes that should always be visible
+        const majorHubs = new Set(["JFK", "LHR", "DXB", "SIN", "HKG", "FRA", "LAX", "CDG", "PEK", "SYD", "ATL", "ORD", "DFW", "AMS", "ICN", "NRT"]);
+        
+        // Show airports at different zoom levels - more generous thresholds
         let airportsToShow: Airport[] = [];
         if (zoom >= 5) {
           airportsToShow = worldAirports; // All airports
-        } else if (zoom >= 3.5) {
+        } else if (zoom >= 4) {
           airportsToShow = worldAirports.filter(a => a.size === "large" || a.size === "medium");
-        } else if (zoom >= 2.5) {
+        } else if (zoom >= 3) {
           airportsToShow = worldAirports.filter(a => a.size === "large");
+        } else if (zoom >= 1.5) {
+          // Show major hubs at any reasonable zoom
+          airportsToShow = worldAirports.filter(a => majorHubs.has(a.code));
         }
         
         const airportCodes = new Set(airportsToShow.map(a => a.code));
@@ -207,9 +266,11 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
         airportsToShow.forEach(airport => {
           const existing = airportMarkersRef.current.get(airport.code);
           if (existing) {
-            // Update existing marker
+            // Update existing marker element for zoom changes
             const newEl = createAirportMarker(airport, zoom);
-            existing.getElement().replaceWith(newEl);
+            const oldEl = existing.getElement();
+            oldEl.innerHTML = newEl.innerHTML;
+            oldEl.title = newEl.title;
           } else {
             // Create new marker
             const el = createAirportMarker(airport, zoom);
