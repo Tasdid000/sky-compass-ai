@@ -1,14 +1,15 @@
 import { useState, useEffect, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { 
-  Plane, Search, MapPin, Layers, Filter, X, 
+  Plane, Search, Filter, X, 
   Sun, Moon, Satellite, ChevronDown, Menu,
-  Gauge, Navigation, Clock, Users, Settings
+  Gauge, Navigation, Radio, RefreshCw, Wifi, WifiOff
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { 
   DropdownMenu, 
   DropdownMenuContent, 
@@ -20,30 +21,47 @@ import {
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { FlightRadarMap } from "@/components/FlightRadarMap";
 import { FlightDetailsPanel } from "@/components/FlightDetailsPanel";
-import { generateLiveFlights, updateFlightPositions, LiveFlight, majorAirports } from "@/data/liveFlights";
-
+import { generateLiveFlights, updateFlightPositions, LiveFlight, majorAirports, airlines } from "@/data/liveFlights";
+import { useLiveFlights } from "@/hooks/useLiveFlights";
+import { toast } from "@/hooks/use-toast";
 const Tracking = () => {
-  const [flights, setFlights] = useState<LiveFlight[]>([]);
+  const [simulatedFlights, setSimulatedFlights] = useState<LiveFlight[]>([]);
   const [selectedFlight, setSelectedFlight] = useState<LiveFlight | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [mapStyle, setMapStyle] = useState<"dark" | "light" | "satellite">("dark");
   const [isFlightListOpen, setIsFlightListOpen] = useState(false);
   const [filterAirline, setFilterAirline] = useState<string | null>(null);
+  const [useLiveData, setUseLiveData] = useState(false);
 
-  // Initialize flights with more worldwide coverage
+  // Live flight data from OpenSky API
+  const { 
+    flights: liveFlights, 
+    isLoading: liveLoading, 
+    error: liveError, 
+    lastUpdate, 
+    isLive,
+    refetch 
+  } = useLiveFlights({ enabled: useLiveData, refreshInterval: 10000 });
+
+  // Choose between live and simulated flights
+  const flights = useLiveData ? liveFlights : simulatedFlights;
+
+  // Initialize simulated flights
   useEffect(() => {
     const initialFlights = generateLiveFlights(200);
-    setFlights(initialFlights);
+    setSimulatedFlights(initialFlights);
   }, []);
 
-  // Update flight positions every second
+  // Update simulated flight positions every second
   useEffect(() => {
+    if (useLiveData) return; // Don't update if using live data
+    
     const interval = setInterval(() => {
-      setFlights(prev => updateFlightPositions(prev, 5));
+      setSimulatedFlights(prev => updateFlightPositions(prev, 5));
     }, 1000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [useLiveData]);
 
   // Update selected flight reference when positions update
   useEffect(() => {
@@ -54,6 +72,22 @@ const Tracking = () => {
       }
     }
   }, [flights, selectedFlight?.id]);
+
+  // Show toast when switching to live data
+  useEffect(() => {
+    if (useLiveData && isLive) {
+      toast({
+        title: "Live Data Active",
+        description: `Tracking ${liveFlights.length} real aircraft worldwide`,
+      });
+    } else if (useLiveData && liveError) {
+      toast({
+        title: "Live Data Error",
+        description: liveError,
+        variant: "destructive",
+      });
+    }
+  }, [isLive, liveError, useLiveData, liveFlights.length]);
 
   // Filter flights based on search
   const filteredFlights = flights.filter(flight => {
@@ -101,11 +135,42 @@ const Tracking = () => {
           
           <div className="h-6 w-px bg-border hidden sm:block" />
           
-          <div className="hidden sm:flex items-center gap-2">
+          <div className="hidden sm:flex items-center gap-3">
+            {/* Live Data Toggle */}
+            <div className="flex items-center gap-2 bg-muted/50 rounded-lg px-3 py-1.5">
+              <Radio className={`w-4 h-4 ${useLiveData && isLive ? "text-destructive animate-pulse" : "text-muted-foreground"}`} />
+              <span className="text-xs font-medium">
+                {useLiveData ? (liveLoading ? "Loading..." : isLive ? "LIVE" : "Offline") : "Simulated"}
+              </span>
+              <Switch
+                checked={useLiveData}
+                onCheckedChange={setUseLiveData}
+                className="scale-75"
+              />
+            </div>
+            
             <Badge variant="outline" className="gap-1">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              {flights.length} Active Flights
+              {useLiveData && isLive ? (
+                <Wifi className="w-3 h-3 text-destructive" />
+              ) : useLiveData ? (
+                <WifiOff className="w-3 h-3 text-muted-foreground" />
+              ) : (
+                <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />
+              )}
+              {flights.length} {useLiveData ? "Real" : "Simulated"} Flights
             </Badge>
+            
+            {useLiveData && (
+              <Button 
+                variant="ghost" 
+                size="icon" 
+                className="h-7 w-7"
+                onClick={() => refetch()}
+                disabled={liveLoading}
+              >
+                <RefreshCw className={`w-3 h-3 ${liveLoading ? "animate-spin" : ""}`} />
+              </Button>
+            )}
           </div>
         </div>
 
@@ -272,12 +337,23 @@ const Tracking = () => {
 
         {/* Stats Overlay */}
         <div className="absolute bottom-4 left-4 flex gap-2">
+          {useLiveData && lastUpdate && (
+            <div className="bg-card/90 backdrop-blur-md rounded-lg px-3 py-2 flex items-center gap-2 border shadow-lg">
+              <Radio className="w-4 h-4 text-destructive animate-pulse" />
+              <div className="text-xs">
+                <p className="text-muted-foreground">Last Update</p>
+                <p className="font-semibold">
+                  {lastUpdate.toLocaleTimeString()}
+                </p>
+              </div>
+            </div>
+          )}
           <div className="bg-card/90 backdrop-blur-md rounded-lg px-3 py-2 flex items-center gap-2 border shadow-lg">
             <Gauge className="w-4 h-4 text-muted-foreground" />
             <div className="text-xs">
               <p className="text-muted-foreground">Avg. Altitude</p>
               <p className="font-semibold">
-                {Math.round(flights.reduce((acc, f) => acc + f.position.altitude, 0) / flights.length).toLocaleString()} ft
+                {flights.length > 0 ? Math.round(flights.reduce((acc, f) => acc + f.position.altitude, 0) / flights.length).toLocaleString() : 0} ft
               </p>
             </div>
           </div>
@@ -286,7 +362,7 @@ const Tracking = () => {
             <div className="text-xs">
               <p className="text-muted-foreground">Avg. Speed</p>
               <p className="font-semibold">
-                {Math.round(flights.reduce((acc, f) => acc + f.position.speed, 0) / flights.length)} mph
+                {flights.length > 0 ? Math.round(flights.reduce((acc, f) => acc + f.position.speed, 0) / flights.length) : 0} mph
               </p>
             </div>
           </div>
@@ -294,21 +370,26 @@ const Tracking = () => {
 
         {/* Legend */}
         <div className="absolute bottom-4 right-4 bg-card/90 backdrop-blur-md rounded-lg p-3 border shadow-lg hidden sm:block">
-          <p className="text-xs font-semibold mb-2">Altitude Legend</p>
+          <p className="text-xs font-semibold mb-2">{useLiveData ? "Live Data" : "Altitude Legend"}</p>
           <div className="space-y-1">
             <div className="flex items-center gap-2 text-xs">
-              <div className="w-3 h-3 rounded-full bg-yellow-500" />
+              <div className="w-3 h-3 rounded-full bg-amber-500" />
               <span>&gt; 30,000 ft</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <div className="w-3 h-3 rounded-full bg-green-500" />
+              <div className="w-3 h-3 rounded-full bg-emerald-500" />
               <span>15,000 - 30,000 ft</span>
             </div>
             <div className="flex items-center gap-2 text-xs">
-              <div className="w-3 h-3 rounded-full bg-blue-500" />
+              <div className="w-3 h-3 rounded-full bg-sky-500" />
               <span>&lt; 15,000 ft</span>
             </div>
           </div>
+          {useLiveData && (
+            <p className="text-[10px] text-muted-foreground mt-2 border-t pt-2">
+              Data: OpenSky Network
+            </p>
+          )}
         </div>
 
         {/* Flight Details Panel */}
