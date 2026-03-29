@@ -373,19 +373,27 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
         const existingMarker = markersRef.current.get(flight.id);
 
         if (existingMarker) {
-          existingMarker.setLngLat([flight.position.lng, flight.position.lat]);
-
           const el = existingMarker.getElement();
           const wasSelected = el.classList.contains("selected");
           if (wasSelected !== isSelected) {
+            // Remove old marker and create a new one to avoid detached element issues
+            existingMarker.remove();
+            markersRef.current.delete(flight.id);
+
             const newEl = createMarkerElement(flight, isSelected);
             newEl.dataset.flightId = flight.id;
             newEl.onclick = (e) => {
               e.stopPropagation();
               onFlightSelect(flight);
             };
-            el.replaceWith(newEl);
+
+            const newMarker = new maplibregl.Marker({ element: newEl })
+              .setLngLat([flight.position.lng, flight.position.lat])
+              .addTo(map.current!);
+
+            markersRef.current.set(flight.id, newMarker);
           } else {
+            existingMarker.setLngLat([flight.position.lng, flight.position.lat]);
             const innerDiv = el.querySelector("div") as HTMLElement;
             if (innerDiv) {
               innerDiv.style.transform = `rotate(${flight.position.heading}deg)`;
