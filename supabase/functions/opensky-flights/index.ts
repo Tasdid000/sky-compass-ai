@@ -5,120 +5,110 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+// Key regions to fetch flights from (lat, lon, radius in nm)
+const REGIONS = [
+  { lat: 40, lon: -40, dist: 250, name: "North Atlantic" },
+  { lat: 51, lon: 0, dist: 250, name: "Europe West" },
+  { lat: 48, lon: 15, dist: 250, name: "Europe Central" },
+  { lat: 40, lon: -90, dist: 250, name: "US Central" },
+  { lat: 35, lon: -118, dist: 250, name: "US West" },
+  { lat: 40, lon: -74, dist: 250, name: "US East" },
+  { lat: 25, lon: 55, dist: 250, name: "Middle East" },
+  { lat: 1, lon: 104, dist: 250, name: "Southeast Asia" },
+  { lat: 35, lon: 140, dist: 250, name: "Japan" },
+  { lat: 22, lon: 114, dist: 250, name: "China South" },
+  { lat: 40, lon: 116, dist: 250, name: "China North" },
+  { lat: -33, lon: 151, dist: 250, name: "Australia" },
+  { lat: 19, lon: -99, dist: 250, name: "Mexico" },
+  { lat: 25, lon: 75, dist: 250, name: "India" },
+  { lat: 37, lon: 127, dist: 250, name: "Korea" },
+  { lat: 6, lon: 3, dist: 250, name: "West Africa" },
+  { lat: -1, lon: 37, dist: 250, name: "East Africa" },
+  { lat: -23, lon: -46, dist: 250, name: "Brazil" },
+];
+
+async function fetchRegion(region: typeof REGIONS[0], signal: AbortSignal): Promise<any[]> {
+  const url = `https://api.adsb.lol/v2/lat/${region.lat}/lon/${region.lon}/dist/${region.dist}`;
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/json",
+      "User-Agent": "SkyVoyage-FlightTracker/1.0",
+    },
+    signal,
+  });
+
+  if (!response.ok) {
+    console.warn(`Region ${region.name} failed: ${response.status}`);
+    return [];
+  }
+
+  const data = await response.json();
+  return data.ac || [];
+}
+
+function transformAircraft(ac: any) {
+  const altitude = typeof ac.alt_baro === "number" ? ac.alt_baro : 0;
+  const speed = typeof ac.gs === "number" ? Math.round(ac.gs * 1.151) : 0;
+  const heading = typeof ac.track === "number" ? ac.track : 0;
+  const verticalRate = typeof ac.baro_rate === "number" ? Math.round(ac.baro_rate) : 0;
+
+  return {
+    icao24: ac.hex || "",
+    callsign: (ac.flight || "").trim() || `UNKNOWN-${ac.hex}`,
+    originCountry: ac.r || "Unknown",
+    position: {
+      lat: ac.lat,
+      lng: ac.lon,
+      altitude,
+      speed,
+      heading,
+      verticalRate,
+    },
+    lastContact: Math.floor(Date.now() / 1000),
+    onGround: ac.alt_baro === "ground",
+    squawk: ac.squawk || null,
+    category: ac.category ? parseInt(ac.category, 16) : null,
+  };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    // Use ADSB.lol free API - no auth required, reliable
-    const apiUrl = "https://api.adsb.lol/v2/ladd";
-    
-    console.log("Fetching from ADSB.lol:", apiUrl);
+    console.log("Fetching flights from ADSB.lol regions...");
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const timeout = setTimeout(() => controller.abort(), 20000);
 
-    let response: Response;
-    let flights: any[] = [];
+    // Fetch all regions in parallel
+    const results = await Promise.allSettled(
+      REGIONS.map(r => fetchRegion(r, controller.signal))
+    );
+    clearTimeout(timeout);
 
-    try {
-      // Try primary: all aircraft feed
-      response = await fetch("https://api.adsb.lol/v2/all", {
-        headers: {
-          "Accept": "application/json",
-          "User-Agent": "SkyVoyage-FlightTracker/1.0",
-        },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+    // Merge and deduplicate by icao24
+    const seen = new Set<string>();
+    const flights: any[] = [];
 
-      if (!response.ok) {
-        throw new Error(`ADSB.lol API error: ${response.status}`);
-      }
-
-      const data = await response.json();
-      const acList = data.ac || [];
-
-      // Transform ADS-B data to our format
-      flights = acList
-        .filter((ac: any) => {
-          // Must have valid position and be airborne
-          return ac.lat != null && ac.lon != null && ac.alt_baro !== "ground" && ac.flight;
-        })
-        .slice(0, 3000) // Limit to 3000 flights for performance
-        .map((ac: any) => {
-          const altitude = typeof ac.alt_baro === "number" ? ac.alt_baro : 0;
-          const speed = typeof ac.gs === "number" ? Math.round(ac.gs * 1.151) : 0; // knots to mph
-          const heading = typeof ac.track === "number" ? ac.track : 0;
-          const verticalRate = typeof ac.baro_rate === "number" ? Math.round(ac.baro_rate) : 0;
-
-          return {
-            icao24: ac.hex || "",
-            callsign: (ac.flight || "").trim() || `UNKNOWN-${ac.hex}`,
-            originCountry: ac.r || "Unknown",
-            position: {
-              lat: ac.lat,
-              lng: ac.lon,
-              altitude: altitude,
-              speed: speed,
-              heading: heading,
-              verticalRate: verticalRate,
-            },
-            lastContact: Math.floor(Date.now() / 1000),
-            onGround: ac.alt_baro === "ground",
-            squawk: ac.squawk || null,
-            category: ac.category ? parseInt(ac.category, 16) : null,
-          };
-        });
-    } catch (fetchErr) {
-      clearTimeout(timeout);
-      console.error("Primary API failed, trying fallback:", fetchErr);
-
-      // Fallback: try OpenSky as secondary
-      const controller2 = new AbortController();
-      const timeout2 = setTimeout(() => controller2.abort(), 10000);
-      
-      try {
-        response = await fetch("https://opensky-network.org/api/states/all", {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "SkyVoyage-FlightTracker/1.0",
-          },
-          signal: controller2.signal,
-        });
-        clearTimeout(timeout2);
-
-        if (!response.ok) throw new Error(`OpenSky error: ${response.status}`);
-
-        const data = await response.json();
-        flights = (data.states || [])
-          .filter((s: any[]) => s[6] != null && s[5] != null && !s[8])
-          .slice(0, 3000)
-          .map((state: any[]) => ({
-            icao24: state[0],
-            callsign: ((state[1] as string) || "").trim() || `UNKNOWN-${state[0]}`,
-            originCountry: state[2],
-            position: {
-              lat: state[6],
-              lng: state[5],
-              altitude: Math.round((state[7] || 0) * 3.28084),
-              speed: Math.round((state[9] || 0) * 2.237),
-              heading: state[10] || 0,
-              verticalRate: Math.round((state[11] || 0) * 196.85),
-            },
-            lastContact: state[4],
-            onGround: state[8],
-            squawk: state[14],
-            category: state[17],
-          }));
-      } catch (fallbackErr) {
-        clearTimeout(timeout2);
-        throw new Error(`All flight data sources failed. Primary: ${fetchErr.message}. Fallback: ${fallbackErr.message}`);
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        for (const ac of result.value) {
+          if (
+            ac.lat != null && ac.lon != null &&
+            ac.alt_baro !== "ground" &&
+            ac.flight &&
+            !seen.has(ac.hex)
+          ) {
+            seen.add(ac.hex);
+            flights.push(transformAircraft(ac));
+          }
+        }
       }
     }
 
-    console.log(`Processed ${flights.length} airborne aircraft`);
+    console.log(`Processed ${flights.length} airborne aircraft from ${REGIONS.length} regions`);
 
     return new Response(
       JSON.stringify({
