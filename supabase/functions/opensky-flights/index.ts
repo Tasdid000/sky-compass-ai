@@ -5,132 +5,124 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-interface OpenSkyState {
-  icao24: string;
-  callsign: string | null;
-  origin_country: string;
-  time_position: number | null;
-  last_contact: number;
-  longitude: number | null;
-  latitude: number | null;
-  baro_altitude: number | null;
-  on_ground: boolean;
-  velocity: number | null;
-  true_track: number | null;
-  vertical_rate: number | null;
-  sensors: number[] | null;
-  geo_altitude: number | null;
-  squawk: string | null;
-  spi: boolean;
-  position_source: number;
-  category: number | null;
-}
-
-interface OpenSkyResponse {
-  time: number;
-  states: (string | number | boolean | null | number[])[][] | null;
-}
-
 serve(async (req) => {
-  // Handle CORS preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const url = new URL(req.url);
-    const lamin = url.searchParams.get("lamin");
-    const lomin = url.searchParams.get("lomin");
-    const lamax = url.searchParams.get("lamax");
-    const lomax = url.searchParams.get("lomax");
-
-    // Build OpenSky API URL
-    let openSkyUrl = "https://opensky-network.org/api/states/all";
-    const params = new URLSearchParams();
+    // Use ADSB.lol free API - no auth required, reliable
+    const apiUrl = "https://api.adsb.lol/v2/ladd";
     
-    if (lamin && lomin && lamax && lomax) {
-      params.append("lamin", lamin);
-      params.append("lomin", lomin);
-      params.append("lamax", lamax);
-      params.append("lomax", lomax);
-    }
+    console.log("Fetching from ADSB.lol:", apiUrl);
 
-    if (params.toString()) {
-      openSkyUrl += `?${params.toString()}`;
-    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
 
-    console.log("Fetching from OpenSky:", openSkyUrl);
+    let response: Response;
+    let flights: any[] = [];
 
-    const response = await fetch(openSkyUrl, {
-      headers: {
-        "Accept": "application/json",
-        "User-Agent": "SkyVoyage-FlightTracker/1.0",
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenSky API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data: OpenSkyResponse = await response.json();
-
-    // Transform the state vectors into a more usable format
-    const flights = data.states?.map((state) => {
-      const [
-        icao24,
-        callsign,
-        origin_country,
-        time_position,
-        last_contact,
-        longitude,
-        latitude,
-        baro_altitude,
-        on_ground,
-        velocity,
-        true_track,
-        vertical_rate,
-        sensors,
-        geo_altitude,
-        squawk,
-        spi,
-        position_source,
-        category,
-      ] = state;
-
-      // Skip aircraft without valid position
-      if (latitude === null || longitude === null) {
-        return null;
-      }
-
-      // Skip aircraft on ground
-      if (on_ground) {
-        return null;
-      }
-
-      return {
-        icao24: icao24 as string,
-        callsign: ((callsign as string) || "").trim() || `UNKNOWN-${icao24}`,
-        originCountry: origin_country as string,
-        position: {
-          lat: latitude as number,
-          lng: longitude as number,
-          altitude: Math.round(((baro_altitude as number) || 0) * 3.28084), // meters to feet
-          speed: Math.round(((velocity as number) || 0) * 2.237), // m/s to mph
-          heading: (true_track as number) || 0,
-          verticalRate: Math.round(((vertical_rate as number) || 0) * 196.85), // m/s to ft/min
+    try {
+      // Try primary: all aircraft feed
+      response = await fetch("https://api.adsb.lol/v2/all", {
+        headers: {
+          "Accept": "application/json",
+          "User-Agent": "SkyVoyage-FlightTracker/1.0",
         },
-        lastContact: last_contact as number,
-        onGround: on_ground as boolean,
-        squawk: squawk as string | null,
-        category: category as number | null,
-      };
-    }).filter(Boolean) || [];
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        throw new Error(`ADSB.lol API error: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const acList = data.ac || [];
+
+      // Transform ADS-B data to our format
+      flights = acList
+        .filter((ac: any) => {
+          // Must have valid position and be airborne
+          return ac.lat != null && ac.lon != null && ac.alt_baro !== "ground" && ac.flight;
+        })
+        .slice(0, 3000) // Limit to 3000 flights for performance
+        .map((ac: any) => {
+          const altitude = typeof ac.alt_baro === "number" ? ac.alt_baro : 0;
+          const speed = typeof ac.gs === "number" ? Math.round(ac.gs * 1.151) : 0; // knots to mph
+          const heading = typeof ac.track === "number" ? ac.track : 0;
+          const verticalRate = typeof ac.baro_rate === "number" ? Math.round(ac.baro_rate) : 0;
+
+          return {
+            icao24: ac.hex || "",
+            callsign: (ac.flight || "").trim() || `UNKNOWN-${ac.hex}`,
+            originCountry: ac.r || "Unknown",
+            position: {
+              lat: ac.lat,
+              lng: ac.lon,
+              altitude: altitude,
+              speed: speed,
+              heading: heading,
+              verticalRate: verticalRate,
+            },
+            lastContact: Math.floor(Date.now() / 1000),
+            onGround: ac.alt_baro === "ground",
+            squawk: ac.squawk || null,
+            category: ac.category ? parseInt(ac.category, 16) : null,
+          };
+        });
+    } catch (fetchErr) {
+      clearTimeout(timeout);
+      console.error("Primary API failed, trying fallback:", fetchErr);
+
+      // Fallback: try OpenSky as secondary
+      const controller2 = new AbortController();
+      const timeout2 = setTimeout(() => controller2.abort(), 10000);
+      
+      try {
+        response = await fetch("https://opensky-network.org/api/states/all", {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "SkyVoyage-FlightTracker/1.0",
+          },
+          signal: controller2.signal,
+        });
+        clearTimeout(timeout2);
+
+        if (!response.ok) throw new Error(`OpenSky error: ${response.status}`);
+
+        const data = await response.json();
+        flights = (data.states || [])
+          .filter((s: any[]) => s[6] != null && s[5] != null && !s[8])
+          .slice(0, 3000)
+          .map((state: any[]) => ({
+            icao24: state[0],
+            callsign: ((state[1] as string) || "").trim() || `UNKNOWN-${state[0]}`,
+            originCountry: state[2],
+            position: {
+              lat: state[6],
+              lng: state[5],
+              altitude: Math.round((state[7] || 0) * 3.28084),
+              speed: Math.round((state[9] || 0) * 2.237),
+              heading: state[10] || 0,
+              verticalRate: Math.round((state[11] || 0) * 196.85),
+            },
+            lastContact: state[4],
+            onGround: state[8],
+            squawk: state[14],
+            category: state[17],
+          }));
+      } catch (fallbackErr) {
+        clearTimeout(timeout2);
+        throw new Error(`All flight data sources failed. Primary: ${fetchErr.message}. Fallback: ${fallbackErr.message}`);
+      }
+    }
 
     console.log(`Processed ${flights.length} airborne aircraft`);
 
     return new Response(
       JSON.stringify({
-        time: data.time,
+        time: Math.floor(Date.now() / 1000),
         flights,
         totalCount: flights.length,
       }),
@@ -138,12 +130,12 @@ serve(async (req) => {
         headers: {
           ...corsHeaders,
           "Content-Type": "application/json",
-          "Cache-Control": "public, max-age=5", // Cache for 5 seconds
+          "Cache-Control": "public, max-age=5",
         },
       }
     );
   } catch (error) {
-    console.error("Error fetching OpenSky data:", error);
+    console.error("Error fetching flight data:", error);
     return new Response(
       JSON.stringify({
         error: error.message || "Failed to fetch flight data",
