@@ -450,22 +450,33 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
 
         if (!selectedFlight) return;
 
-        const routeCoords = selectedFlight.greatCirclePath.map(p => [p.lng, p.lat]);
-        const currentIndex = Math.floor((selectedFlight.progress / 100) * (routeCoords.length - 1));
-        
-        // Past route (traveled path) - bright green
-        const pastCoords = routeCoords.slice(0, currentIndex + 1);
-        if (pastCoords.length > 1) {
+        // Use actual recorded trail positions for the real path
+        const trailCoords = selectedFlight.trail && selectedFlight.trail.length > 1
+          ? selectedFlight.trail.map(p => [p.lng, p.lat])
+          : [];
+
+        // Add current position to trail if not already there
+        const currentPos = [selectedFlight.position.lng, selectedFlight.position.lat];
+        if (trailCoords.length > 0) {
+          const last = trailCoords[trailCoords.length - 1];
+          if (last[0] !== currentPos[0] || last[1] !== currentPos[1]) {
+            trailCoords.push(currentPos);
+          }
+        } else {
+          trailCoords.push(currentPos);
+        }
+
+        // Draw the real recorded trail - bright green
+        if (trailCoords.length > 1) {
           map.current.addSource("flight-trail", {
             type: "geojson",
             data: {
               type: "Feature",
               properties: {},
-              geometry: { type: "LineString", coordinates: pastCoords },
+              geometry: { type: "LineString", coordinates: trailCoords },
             },
           });
 
-          // Glow effect for trail
           map.current.addLayer({
             id: "flight-trail-glow",
             type: "line",
