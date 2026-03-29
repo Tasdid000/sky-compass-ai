@@ -503,8 +503,10 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
           });
         }
 
-        // Future route (remaining path) - dashed purple
-        const futureCoords = routeCoords.slice(currentIndex);
+        // Future route (projected path to destination) - dashed purple
+        const greatCircleCoords = selectedFlight.greatCirclePath.map(p => [p.lng, p.lat]);
+        const futureStartIndex = Math.floor((selectedFlight.progress / 100) * (greatCircleCoords.length - 1));
+        const futureCoords = greatCircleCoords.slice(futureStartIndex);
         if (futureCoords.length > 1) {
           map.current.addSource("flight-future", {
             type: "geojson",
