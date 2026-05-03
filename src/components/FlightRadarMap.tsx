@@ -450,63 +450,90 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
 
         if (!selectedFlight) return;
 
-        // Use actual recorded trail positions for the real path
-        const trailCoords = selectedFlight.trail && selectedFlight.trail.length > 1
-          ? selectedFlight.trail.map(p => [p.lng, p.lat])
+        // Flightradar24 signature yellow
+        const FR24_YELLOW = "#facc15";
+        const FR24_YELLOW_DIM = "#a98e1a";
+
+        const currentPos: [number, number] = [selectedFlight.position.lng, selectedFlight.position.lat];
+
+        // ---- COMPLETED PATH (origin → current position) ----
+        // Combine great-circle path from origin up to current progress with actual recorded trail
+        const greatCircleCoords = selectedFlight.greatCirclePath.map(p => [p.lng, p.lat] as [number, number]);
+        const progressIndex = Math.max(
+          1,
+          Math.floor((selectedFlight.progress / 100) * (greatCircleCoords.length - 1))
+        );
+        const completedGC = greatCircleCoords.slice(0, progressIndex + 1);
+
+        const recordedTrail: [number, number][] = (selectedFlight.trail && selectedFlight.trail.length > 0)
+          ? selectedFlight.trail.map(p => [p.lng, p.lat] as [number, number])
           : [];
 
-        // Add current position to trail if not already there
-        const currentPos = [selectedFlight.position.lng, selectedFlight.position.lat];
-        if (trailCoords.length > 0) {
-          const last = trailCoords[trailCoords.length - 1];
-          if (last[0] !== currentPos[0] || last[1] !== currentPos[1]) {
-            trailCoords.push(currentPos);
-          }
+        // Build completed line: origin → great circle to (start of trail or current) → recorded trail → current
+        let completedCoords: [number, number][] = [];
+        if (recordedTrail.length > 0) {
+          completedCoords = [...completedGC, ...recordedTrail, currentPos];
         } else {
-          trailCoords.push(currentPos);
+          completedCoords = [...completedGC, currentPos];
         }
 
-        // Draw the real recorded trail - bright green
-        if (trailCoords.length > 1) {
+        // Deduplicate consecutive identical points
+        completedCoords = completedCoords.filter((c, i, arr) => {
+          if (i === 0) return true;
+          return c[0] !== arr[i - 1][0] || c[1] !== arr[i - 1][1];
+        });
+
+        if (completedCoords.length > 1) {
           map.current.addSource("flight-trail", {
             type: "geojson",
             data: {
               type: "Feature",
               properties: {},
-              geometry: { type: "LineString", coordinates: trailCoords },
+              geometry: { type: "LineString", coordinates: completedCoords },
             },
           });
 
+          // Soft outer glow
           map.current.addLayer({
             id: "flight-trail-glow",
             type: "line",
             source: "flight-trail",
             layout: { "line-join": "round", "line-cap": "round" },
             paint: {
-              "line-color": "#22c55e",
-              "line-width": 12,
-              "line-opacity": 0.3,
-              "line-blur": 6,
+              "line-color": FR24_YELLOW,
+              "line-width": 10,
+              "line-opacity": 0.25,
+              "line-blur": 8,
             },
           });
 
+          // Crisp main line (FR24 style)
           map.current.addLayer({
             id: "flight-trail-line",
             type: "line",
             source: "flight-trail",
             layout: { "line-join": "round", "line-cap": "round" },
             paint: {
-              "line-color": "#22c55e",
-              "line-width": 4,
-              "line-opacity": 1,
+              "line-color": FR24_YELLOW,
+              "line-width": 3,
+              "line-opacity": 0.95,
             },
           });
         }
 
-        // Future route (projected path to destination) - dashed purple
-        const greatCircleCoords = selectedFlight.greatCirclePath.map(p => [p.lng, p.lat]);
-        const futureStartIndex = Math.floor((selectedFlight.progress / 100) * (greatCircleCoords.length - 1));
-        const futureCoords = greatCircleCoords.slice(futureStartIndex);
+        // ---- FUTURE PATH (current → destination) ----
+        const futureCoords: [number, number][] = [
+          currentPos,
+          ...greatCircleCoords.slice(progressIndex + 1),
+        ];
+        if (
+          futureCoords.length > 1 &&
+          (futureCoords[futureCoords.length - 1][0] !== selectedFlight.destination.lng ||
+            futureCoords[futureCoords.length - 1][1] !== selectedFlight.destination.lat)
+        ) {
+          futureCoords.push([selectedFlight.destination.lng, selectedFlight.destination.lat]);
+        }
+
         if (futureCoords.length > 1) {
           map.current.addSource("flight-future", {
             type: "geojson",
@@ -523,15 +550,15 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
             source: "flight-future",
             layout: { "line-join": "round", "line-cap": "round" },
             paint: {
-              "line-color": "#a855f7",
-              "line-width": 3,
-              "line-opacity": 0.7,
-              "line-dasharray": [4, 4],
+              "line-color": FR24_YELLOW_DIM,
+              "line-width": 2,
+              "line-opacity": 0.75,
+              "line-dasharray": [2, 3],
             },
           });
         }
 
-        // Origin marker - green with pulse
+        // ---- ORIGIN marker (filled yellow ring) ----
         map.current.addSource("origin-point", {
           type: "geojson",
           data: {
@@ -549,9 +576,10 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
           type: "circle",
           source: "origin-point",
           paint: {
-            "circle-radius": 20,
-            "circle-color": "#22c55e",
-            "circle-opacity": 0.2,
+            "circle-radius": 14,
+            "circle-color": FR24_YELLOW,
+            "circle-opacity": 0.18,
+            "circle-blur": 0.6,
           },
         });
 
@@ -560,14 +588,14 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
           type: "circle",
           source: "origin-point",
           paint: {
-            "circle-radius": 12,
-            "circle-color": "#22c55e",
-            "circle-stroke-width": 3,
+            "circle-radius": 6,
+            "circle-color": FR24_YELLOW,
+            "circle-stroke-width": 2,
             "circle-stroke-color": "#ffffff",
           },
         });
 
-        // Destination marker - red with pulse
+        // ---- DESTINATION marker (hollow ring) ----
         map.current.addSource("dest-point", {
           type: "geojson",
           data: {
@@ -585,9 +613,10 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
           type: "circle",
           source: "dest-point",
           paint: {
-            "circle-radius": 20,
-            "circle-color": "#ef4444",
-            "circle-opacity": 0.2,
+            "circle-radius": 14,
+            "circle-color": FR24_YELLOW,
+            "circle-opacity": 0.15,
+            "circle-blur": 0.6,
           },
         });
 
@@ -596,10 +625,10 @@ export const FlightRadarMap = memo(forwardRef<HTMLDivElement, FlightRadarMapProp
           type: "circle",
           source: "dest-point",
           paint: {
-            "circle-radius": 12,
-            "circle-color": "#ef4444",
-            "circle-stroke-width": 3,
-            "circle-stroke-color": "#ffffff",
+            "circle-radius": 6,
+            "circle-color": "#0b0b0b",
+            "circle-stroke-width": 2.5,
+            "circle-stroke-color": FR24_YELLOW,
           },
         });
       };
